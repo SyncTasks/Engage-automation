@@ -1,13 +1,13 @@
 """
-Engage応募者通知 → Chatwork連携 + スプレッドシート記録 (GitHub Actions版)
+Engage応募通知 → Chatwork/LINE連携
 
-v4機能統合版:
 - ムームードメインのメールサーバーにIMAP直接接続
 - 「ユーザ」シートから対象アカウント取得（媒体名=engage, is_active=TRUE）
 - 「通知設定」シートから通知先設定を取得（通知設定名でマッチ）
 - 職種・施設形態マッピングを外部スプレッドシートから取得
 - ChatGPT連携で都道府県・企業名抽出
-- 並列処理対応（最大5スレッド）
+- 並列処理対応（最大2スレッド）
+- 重複防止: IMAPフラグ（処理済みメールにスターを付与）
 
 環境変数:
   - GOOGLE_CREDENTIALS: Google サービスアカウントのJSON
@@ -20,8 +20,7 @@ import os
 import re
 import sys
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Dict, List, Set, Tuple
-import threading
+from typing import Optional, Dict, List
 import time
 
 
@@ -63,15 +62,13 @@ from imap_tools import MailBox, AND
 IMAP_SERVER = 'imap4.muumuu-mail.com'
 ENGAGE_SENDER_ADDRESS = 'system@en-gage.net'  # Engageからの通知メール送信元
 
-# スプレッドシートID
+# スプレッドシートID（設定情報の読み取り用）
 CONFIG_SPREADSHEET_ID = '1HzSM76jUtUOzHiy1zg3Ivqg_-nTn0iFwVwrzG82hQzU'  # ログイン情報・通知設定
-OUTPUT_SPREADSHEET_ID = '1kOOWPTX3MNhBPXIuZcGn6WNT01iGWkJlbcSmlSAA8Qo'  # 出力先
 MAPPING_SPREADSHEET_ID = '13SErWeTXqTbqgR3n16GT1__8LLI2r8egGx4defJbQ9k'  # マッピングシート
 
 # シート名
 CONFIG_SHEET_NAME = 'ユーザ'
 NOTIFY_SHEET_NAME = '通知設定'
-OUTPUT_SHEET_NAME = '応募者シート'
 JOB_MAPPING_SHEET_NAME = '職種_Akindo独自'
 FACILITY_MAPPING_SHEET_NAME = '施設形態_Akindo独自'
 
@@ -141,22 +138,16 @@ def extract_apply_id(body_text: str) -> str:
 
 
 def extract_location_from_body(body_text: str) -> str:
-    """メール本文から勤務地を抽出
-
-    Engageのメールは主にテキスト形式。
-    本文に勤務地情報が含まれていない場合が多い。
-    """
+    """メール本文から勤務地を抽出"""
     if not body_text:
         return ''
 
-    # HTMLタグがあれば除去
     text = re.sub(r'<[^>]+>', ' ', body_text)
     text = re.sub(r'&nbsp;', ' ', text)
     text = re.sub(r'\s+', ' ', text)
 
     prefectures_pattern = '|'.join(re.escape(p) for p in sorted(PREFECTURES, key=len, reverse=True))
 
-    # 「勤務地」ラベルの後に都道府県がある場合
     pattern = rf'勤務地[：:\s]*((?:{prefectures_pattern})[^\s]*)'
     match = re.search(pattern, text)
     if match:
@@ -186,24 +177,18 @@ def determine_facility_type(title: str, facility_mappings: Dict[str, List[str]])
 
 
 def extract_prefecture_from_body(body_text: str) -> Optional[str]:
-    """メール本文から都道府県を抽出
-
-    Engageのメールはテキスト形式。本文に都道府県が含まれない場合が多い。
-    """
+    """メール本文から都道府県を抽出"""
     if not body_text:
         return None
 
-    # HTMLタグがあれば除去
     text = re.sub(r'<[^>]+>', ' ', body_text)
     text = re.sub(r'&nbsp;', ' ', text)
 
-    # 「勤務地」ラベル付近の都道府県を優先
     for pref in sorted(PREFECTURES, key=len, reverse=True):
         pattern = rf'勤務地[^\n]{{0,30}}{re.escape(pref)}'
         if re.search(pattern, text):
             return pref
 
-    # テキスト全体から都道府県を検索
     for pref in sorted(PREFECTURES, key=len, reverse=True):
         if pref in text:
             return pref
@@ -212,7 +197,7 @@ def extract_prefecture_from_body(body_text: str) -> Optional[str]:
 
 
 def extract_info_with_chatgpt(html_body: str) -> dict:
-    """ChatGPTを使用してHTML本文から都道府県・企業名を抽出"""
+    """ChatGPTを使用して本文から都道府県・企業名を抽出"""
     api_key = get_env_optional('OPENAI_API_KEY')
 
     if not api_key:
@@ -294,16 +279,15 @@ def get_region(prefecture: str) -> str:
     return REGION_MAPPINGS.get(prefecture, '')
 
 
-# ===== Google Sheets関連 =====
+# ===== Google Sheets関連（設定読み取りのみ） =====
 
 def get_sheets_client():
     """Google Sheets クライアントを取得"""
     scopes = [
-        'https://www.googleapis.com/auth/spreadsheets',
-        'https://www.googleapis.com/auth/drive'
+        'https://www.googleapis.com/auth/spreadsheets.readonly',
+        'https://www.googleapis.com/auth/drive.readonly'
     ]
 
-    # 1. credentials.json ファイルを探す（ローカル開発用）
     script_dir = os.path.dirname(os.path.abspath(__file__))
     creds_file = os.path.join(script_dir, 'credentials.json')
 
@@ -315,7 +299,6 @@ def get_sheets_client():
         except Exception as e:
             print(f'credentials.json 読み込みエラー: {e}')
 
-    # 2. 環境変数から取得（GitHub Actions用）
     creds_json = get_env_optional('GOOGLE_CREDENTIALS')
     if creds_json:
         try:
@@ -331,7 +314,7 @@ def get_sheets_client():
 
 
 def get_notification_settings(client) -> Dict[str, dict]:
-    """通知設定シートから設定を取得（通知設定名をキーにした辞書）"""
+    """通知設定シートから設定を取得"""
     if not client:
         return {}
 
@@ -364,10 +347,7 @@ def get_notification_settings(client) -> Dict[str, dict]:
 
 
 def get_login_credentials(client, notification_settings: Dict[str, dict], instant_only: bool = False) -> List[dict]:
-    """ログイン情報シートから認証情報を取得（Engage + is_active=TRUE）
-
-    instant_only=True の場合、即時反応=TRUE のクライアントのみ返す
-    """
+    """ログイン情報シートから認証情報を取得（engage + is_active=TRUE）"""
     if not client:
         return []
 
@@ -385,27 +365,22 @@ def get_login_credentials(client, notification_settings: Dict[str, dict], instan
             is_active = record.get('is_active', False)
             notify_setting_name = record.get('通知設定名', '')
 
-            # engage かつ is_active=TRUE のみ（文字列"TRUE"にも対応）
             is_active_bool = is_active == True or str(is_active).upper() == 'TRUE'
             if not (email and password and media == 'engage' and is_active_bool):
                 continue
 
-            # 即時反応フラグを判定
             instant_flag = record.get('即時反応', False)
             is_instant = instant_flag == True or str(instant_flag).upper() == 'TRUE'
 
-            # --instant モードの場合、即時反応=TRUE のみ
-            # 通常モードの場合、即時反応=TRUE をスキップ
             if instant_only and not is_instant:
                 continue
             if not instant_only and is_instant:
                 continue
 
-            # 通知設定を取得
             notify_config = notification_settings.get(notify_setting_name, {})
 
             credentials.append({
-                'row': i + 2,  # ヘッダー行を考慮
+                'row': i + 2,
                 'email': email,
                 'password': password,
                 'client_name': client_name,
@@ -478,142 +453,6 @@ def get_facility_mappings(client) -> Dict[str, List[str]]:
     except Exception as e:
         print(f'施設形態マッピング取得エラー: {e}')
         return {}
-
-
-# ===== スレッドセーフな重複チェック =====
-
-class DuplicateCache:
-    """メモリ上で重複チェックを行うキャッシュ
-
-    Engageはメールに応募者名が含まれないため、
-    (応募日時, タイトル) および apply_id で重複判定する。
-    """
-    def __init__(self):
-        self._existing_records: Set[Tuple[str, str]] = set()  # (応募日時, タイトル)
-        self._existing_apply_ids: Set[str] = set()
-        self._lock = threading.Lock()
-        self._headers: list = []
-        self._initialized = False
-
-    def initialize(self, client):
-        """スプレッドシートから既存データを読み込み"""
-        with self._lock:
-            if self._initialized:
-                return True
-            try:
-                spreadsheet = client.open_by_key(OUTPUT_SPREADSHEET_ID)
-                worksheet = spreadsheet.worksheet(OUTPUT_SHEET_NAME)
-                self._headers = worksheet.row_values(1)
-                records = worksheet.get_all_records()
-                for record in records:
-                    date_str = record.get('応募日時', '')
-                    title = record.get('タイトル', '')
-                    apply_id = record.get('応募ID', '')
-                    if date_str and title:
-                        self._existing_records.add((date_str, title))
-                    if apply_id:
-                        self._existing_apply_ids.add(apply_id)
-                self._initialized = True
-                print(f"重複チェックキャッシュ初期化完了: {len(self._existing_records)}件")
-                return True
-            except Exception as e:
-                import traceback
-                print(f"キャッシュ初期化エラー: {type(e).__name__}: {e}")
-                print(f"詳細: {traceback.format_exc()}")
-                return False
-
-    def is_duplicate(self, date: datetime, title: str, apply_id: str = '') -> bool:
-        """重複チェック（メモリキャッシュを使用）"""
-        with self._lock:
-            # apply_idがあればそれで判定（最も確実）
-            if apply_id and apply_id in self._existing_apply_ids:
-                return True
-            # (日時, タイトル)で判定
-            date_str = date.strftime('%Y/%m/%d %H:%M:%S')
-            return (date_str, title) in self._existing_records
-
-    def add_record(self, date: datetime, title: str, apply_id: str = ''):
-        """新規レコードをキャッシュに追加"""
-        date_str = date.strftime('%Y/%m/%d %H:%M:%S')
-        with self._lock:
-            self._existing_records.add((date_str, title))
-            if apply_id:
-                self._existing_apply_ids.add(apply_id)
-
-    def get_headers(self) -> list:
-        """ヘッダー行を取得"""
-        return self._headers
-
-
-# グローバルキャッシュインスタンス
-duplicate_cache = DuplicateCache()
-
-# スプレッドシート書き込み用ロック（同時書き込み防止）
-spreadsheet_lock = threading.Lock()
-
-
-def append_to_spreadsheet(client, data: dict, max_retries: int = 3) -> str:
-    """スプレッドシートに行を追加（リトライ機能付き）
-
-    Returns:
-        'success': 書き込み成功
-        'duplicate': 重複データ
-        'error': 書き込みエラー
-    """
-    if not client:
-        return 'error'
-
-    # メモリキャッシュで重複チェック
-    if duplicate_cache.is_duplicate(data['date'], data.get('title', ''), data.get('apply_id', '')):
-        print(f"重複データのためスキップ: {data.get('title', '')}")
-        return 'duplicate'
-
-    # v4のヘッダーに合わせてマッピング
-    data_map = {
-        '応募日時': data['date'].strftime('%Y/%m/%d %H:%M:%S'),
-        'メールアドレス': data.get('email', ''),
-        '名前': data.get('name', ''),
-        '職種': data.get('job_type', ''),
-        '施設形態': data.get('facility_type', ''),
-        '施設形態詳細': data.get('facility_type_detail', ''),
-        '都道府県': data.get('prefecture', ''),
-        '勤務地': data.get('location', ''),
-        'エリア': data.get('region', ''),
-        'タイトル': data.get('title', ''),
-        'クライアント': data.get('client', ''),
-        '媒体': 'ENG',
-        '応募先企業名': data.get('company_name', ''),
-        '応募ID': data.get('apply_id', ''),
-        '応募URL': data.get('apply_url', ''),
-        'メール送信状況': '送信待ち'
-    }
-
-    # ヘッダーに合わせて行データを作成
-    headers = duplicate_cache.get_headers()
-    row_data = []
-    for header in headers:
-        row_data.append(data_map.get(header, ''))
-
-    # リトライ付き書き込み
-    for attempt in range(max_retries):
-        try:
-            with spreadsheet_lock:
-                spreadsheet = client.open_by_key(OUTPUT_SPREADSHEET_ID)
-                worksheet = spreadsheet.worksheet(OUTPUT_SHEET_NAME)
-                worksheet.append_row(row_data, value_input_option='USER_ENTERED')
-                # キャッシュに追加
-                duplicate_cache.add_record(data['date'], data.get('title', ''), data.get('apply_id', ''))
-            print(f'スプレッドシート記録完了: {data.get("title", "")}')
-            return 'success'
-        except Exception as e:
-            if '429' in str(e) and attempt < max_retries - 1:
-                wait_time = (attempt + 1) * 10  # 10秒、20秒、30秒
-                print(f'API制限エラー、{wait_time}秒待機後リトライ... ({attempt + 1}/{max_retries})')
-                time.sleep(wait_time)
-            else:
-                print(f'スプレッドシート書き込みエラー: {e}')
-                return 'error'
-    return 'error'
 
 
 # ===== 通知関連 =====
@@ -756,7 +595,6 @@ def process_mailbox(credential: dict, sheets_client, job_mappings: dict, facilit
 
     count = 0
     try:
-        # IMAPでメールボックスに接続（タイムアウト60秒）
         print(f'  [{client_name}] IMAP接続開始: {IMAP_SERVER}...')
         mailbox = MailBox(IMAP_SERVER, timeout=60)
         print(f'  [{client_name}] IMAP接続成功、ログイン中...')
@@ -764,7 +602,7 @@ def process_mailbox(credential: dict, sheets_client, job_mappings: dict, facilit
         print(f'  [{client_name}] ログイン成功')
 
         with mailbox_ctx as mb:
-            # Engageからのフラグなしメールを検索（IMAP側でfrom絞り込み）
+            # Engageからのフラグなしメールを検索（処理済みはフラグ付きなのでスキップされる）
             query = AND(flagged=False, from_=ENGAGE_SENDER_ADDRESS)
             print(f'  [{client_name}] メール検索中 (flagged=False, from={ENGAGE_SENDER_ADDRESS})...')
 
@@ -774,7 +612,6 @@ def process_mailbox(credential: dict, sheets_client, job_mappings: dict, facilit
             skipped_non_apply = 0
             skipped_old = 0
             skipped_no_title = 0
-            skipped_duplicate = 0
 
             for i, msg in enumerate(messages):
                 from_addr = msg.from_ or ''
@@ -799,7 +636,6 @@ def process_mailbox(credential: dict, sheets_client, job_mappings: dict, facilit
                 now_jst = datetime.now(JST)
                 days_ago = (now_jst - mail_date_jst).days
                 if days_ago > SEARCH_DAYS_AGO:
-                    # 古いメールにもフラグを付けて次回スキップ
                     mb.flag(msg.uid, ['\\Flagged'], True)
                     skipped_old += 1
                     print(f'    → スキップ: {days_ago}日前（フラグ付与）')
@@ -814,11 +650,10 @@ def process_mailbox(credential: dict, sheets_client, job_mappings: dict, facilit
                     print(f'    → スキップ: 職種名抽出失敗')
                     continue
 
-                # メール本文を取得（Engageはテキスト形式が主）
+                # メール本文を取得
                 body_text = msg.text or ''
                 html_body = msg.html or ''
                 if not body_text and html_body:
-                    # HTMLしかない場合はテキスト化
                     body_text = re.sub(r'<[^>]+>', ' ', html_body)
                     body_text = re.sub(r'&nbsp;', ' ', body_text)
                     body_text = re.sub(r'\s+', ' ', body_text).strip()
@@ -838,13 +673,6 @@ def process_mailbox(credential: dict, sheets_client, job_mappings: dict, facilit
                 print(f'    応募ID: {apply_id or "(なし)"}')
                 print(f'    応募URL: {apply_url or "(なし)"}')
 
-                # 重複チェック（APIを叩く前に判定）
-                if duplicate_cache.is_duplicate(mail_date_jst, job_title, apply_id):
-                    mb.flag(msg.uid, ['\\Flagged'], True)
-                    skipped_duplicate += 1
-                    print(f'    → スキップ: 重複データ（フラグ付与）')
-                    continue
-
                 # 職種・施設形態を判定
                 job_types = determine_job_types(job_title, job_mappings)
                 facility_type, facility_type_detail = determine_facility_type(job_title, facility_mappings)
@@ -858,7 +686,7 @@ def process_mailbox(credential: dict, sheets_client, job_mappings: dict, facilit
                 company_name = ''
                 print(f'    本文都道府県抽出: {prefecture or "(見つからず)"}')
 
-                # ChatGPTで追加情報抽出（本文にデータがある場合のみ）
+                # ChatGPTで追加情報抽出
                 chatgpt_input = html_body if html_body else body_text
                 if chatgpt_input:
                     print(f'    ChatGPT抽出開始...')
@@ -869,31 +697,25 @@ def process_mailbox(credential: dict, sheets_client, job_mappings: dict, facilit
                     if not prefecture:
                         prefecture = chatgpt_result.get('prefecture')
                     company_name = chatgpt_result.get('company_name', '')
-                else:
-                    chatgpt_result = {}
 
                 print(f'    最終都道府県: {prefecture or "(不明)"}')
                 print(f'    企業名: {company_name or "(不明)"}')
 
                 region = get_region(prefecture) if prefecture else ''
 
-                # 勤務地を本文から抽出
                 location = extract_location_from_body(body_text)
                 if not location and html_body:
                     location = extract_location_from_body(html_body)
                 print(f'    勤務地抽出: {location or "(見つからず)"}')
 
-                # データを構築（Engageはメールに応募者名なし）
+                # 通知データを構築
                 record_data = {
                     'date': mail_date_jst,
-                    'email': from_addr,
-                    'name': '',  # Engageメールには応募者名なし
+                    'title': job_title,
                     'job_type': ', '.join(job_types) if job_types else '',
                     'facility_type': facility_type,
-                    'facility_type_detail': facility_type_detail,
                     'prefecture': prefecture or '',
                     'region': region,
-                    'title': job_title,
                     'location': location,
                     'client': client_name,
                     'company_name': company_name,
@@ -901,26 +723,14 @@ def process_mailbox(credential: dict, sheets_client, job_mappings: dict, facilit
                     'apply_url': apply_url
                 }
 
-                # スプレッドシートに記録
-                print(f'    スプレッドシート書き込み中...')
-                write_result = append_to_spreadsheet(sheets_client, record_data)
-                print(f'    書き込み結果: {write_result}')
+                # 通知を送信
+                print(f'    通知送信中...')
+                send_notification(record_data, notify_config, instant_mode=instant_mode)
 
-                if write_result == 'success':
-                    # 通知を送信
-                    print(f'    通知送信中...')
-                    send_notification(record_data, notify_config, instant_mode=instant_mode)
-
-                    # フラグ（スター）を付ける
-                    mb.flag(msg.uid, ['\\Flagged'], True)
-                    print(f'    → 完了: 通知送信・フラグ付与')
-                    count += 1
-                elif write_result == 'duplicate':
-                    # 重複データにもフラグを付ける（再処理を防ぐ）
-                    mb.flag(msg.uid, ['\\Flagged'], True)
-                    print(f'    → 重複: フラグ付与')
-                else:
-                    print(f'    → 失敗: 書き込みエラー（フラグなし）')
+                # フラグ（スター）を付けて処理済みにする
+                mb.flag(msg.uid, ['\\Flagged'], True)
+                print(f'    → 完了: 通知送信・フラグ付与')
+                count += 1
 
             # サマリー
             print(f'\n  [{client_name}] --- メール処理サマリー ---')
@@ -928,8 +738,7 @@ def process_mailbox(credential: dict, sheets_client, job_mappings: dict, facilit
             print(f'    応募以外スキップ: {skipped_non_apply}件')
             print(f'    古いメールスキップ: {skipped_old}件')
             print(f'    職種名抽出失敗スキップ: {skipped_no_title}件')
-            print(f'    重複スキップ: {skipped_duplicate}件')
-            print(f'    新規処理: {count}件')
+            print(f'    新規通知: {count}件')
 
     except Exception as e:
         print(f'[{client_name}] メール処理エラー: {type(e).__name__}: {e}')
@@ -939,7 +748,7 @@ def process_mailbox(credential: dict, sheets_client, job_mappings: dict, facilit
     if count == 0:
         print(f'[{client_name}] 新着応募なし ({elapsed:.1f}秒)')
     else:
-        print(f'[{client_name}] 処理完了: {count}件 ({elapsed:.1f}秒)')
+        print(f'[{client_name}] 処理完了: {count}件通知 ({elapsed:.1f}秒)')
 
     return count
 
@@ -947,8 +756,7 @@ def process_mailbox(credential: dict, sheets_client, job_mappings: dict, facilit
 def main():
     import traceback
 
-    # コマンドライン引数の解析
-    parser = argparse.ArgumentParser(description='Engage応募メール処理')
+    parser = argparse.ArgumentParser(description='Engage応募通知')
     parser.add_argument('--instant', action='store_true',
                         help='即時反応モード: 即時反応=TRUEのクライアントのみ処理し、LINE通知も送信')
     args = parser.parse_args()
@@ -956,14 +764,14 @@ def main():
 
     main_start = time.time()
 
-    mode_label = "即時反応モード" if instant_mode else "v4統合版"
+    mode_label = "即時反応モード" if instant_mode else "通常モード"
     print("="*50)
-    print(f"Engage応募メール処理 開始 ({mode_label})")
-    print(f"コードバージョン: 2026-02-12a")
+    print(f"Engage応募通知 開始 ({mode_label})")
+    print(f"コードバージョン: 2026-02-12b")
     print(f"実行日時: {datetime.now(JST).strftime('%Y/%m/%d %H:%M:%S')} (JST)")
     print("="*50)
 
-    # Google Sheets クライアント
+    # Google Sheets クライアント（設定読み取り用）
     print('\n[初期化] Google Sheets認証中...')
     sheets_client = get_sheets_client()
     if not sheets_client:
@@ -971,12 +779,6 @@ def main():
         return
 
     print('[初期化] Google Sheets連携: 有効')
-
-    # 重複チェック用キャッシュを初期化（1回だけAPI呼び出し）
-    print('[初期化] 重複チェックキャッシュ初期化中...')
-    if not duplicate_cache.initialize(sheets_client):
-        print('エラー: 重複チェックキャッシュの初期化に失敗しました')
-        return
 
     # 通知設定を取得（即時反応モードでは不要）
     if instant_mode:
@@ -1013,7 +815,6 @@ def main():
     total_count = 0
 
     def _process(idx, cred):
-        """スレッドで実行するラッパー"""
         print(f'\n{"#"*50}')
         print(f'# アカウント {idx+1}/{len(credentials)}: {cred["client_name"]}')
         print(f'{"#"*50}')
@@ -1037,7 +838,7 @@ def main():
 
     total_elapsed = time.time() - main_start
     print(f'\n{"="*50}')
-    print(f'全処理完了: 新着応募 合計 {total_count}件')
+    print(f'全処理完了: 新着通知 合計 {total_count}件')
     print(f'総実行時間: {total_elapsed:.1f}秒')
     print(f'終了時刻: {datetime.now(JST).strftime("%Y/%m/%d %H:%M:%S")} (JST)')
     print(f'{"="*50}')
@@ -1050,11 +851,9 @@ if __name__ == '__main__':
     _today = _now.strftime('%Y%m%d')
 
     if _is_instant:
-        # 即時反応モード: 日次1ファイルに追記（1分ごと実行のため）
         _log_dir = os.path.join(_script_base, 'logs_instant')
         _log_path = os.path.join(_log_dir, _today + '.log')
     else:
-        # 通常モード: 実行ごとに1ファイル
         _log_dir = os.path.join(_script_base, 'logs')
         _log_path = os.path.join(_log_dir, _now.strftime('%Y%m%d_%H%M%S') + '.log')
 

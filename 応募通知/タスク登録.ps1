@@ -2,7 +2,7 @@
 # 管理者権限のPowerShellで実行してください
 
 $taskName = "Engage応募チェック"
-$basePath = "C:\Users\Administrator\Documents\GitHub\Engage-automation\応募転記"
+$basePath = "C:\Users\Administrator\Documents\GitHub\Engage-automation\応募通知"
 $batPath  = Join-Path $basePath "実行.bat"
 
 # 既存タスクがあれば削除
@@ -33,7 +33,7 @@ Register-ScheduledTask `
     -Settings $settings `
     -User "SYSTEM" `
     -RunLevel Highest `
-    -Description "Engageからの応募メールを1時間ごとにチェックし、スプレッドシートに転記・Chatwork通知"
+    -Description "Engageからの応募メールを1時間ごとにチェックし、Chatwork通知"
 
 Write-Host ""
 Write-Host "[完了] タスク '$taskName' を登録しました" -ForegroundColor Green
