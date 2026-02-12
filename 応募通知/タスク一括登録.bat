@@ -1,14 +1,15 @@
 @echo off
-chcp 65001 >nul
 
-:: 管理者権限チェック・昇格
+:: 管理者権限チェック・昇格（chcp前に実行）
 net session >nul 2>&1
 if %errorlevel% neq 0 (
     echo 管理者権限で再起動します...
-    powershell -Command "Start-Process '%~f0' -Verb RunAs"
+    powershell -NoProfile -Command "Start-Process '%~f0' -Verb RunAs"
     exit /b
 )
 
+:: ここから管理者権限で実行
+chcp 65001 >nul
 cd /d "%~dp0"
 echo === Engage タスク一括登録 ===
 echo.
