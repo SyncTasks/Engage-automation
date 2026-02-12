@@ -339,13 +339,13 @@ def get_region(prefecture: str) -> str:
     return REGION_MAPPINGS.get(prefecture, '')
 
 
-# ===== Google Sheets関連 =====
+# ===== Google Sheets関連（読み取りのみ） =====
 
 def get_sheets_client():
     """Google Sheets クライアントを取得"""
     scopes = [
-        'https://www.googleapis.com/auth/spreadsheets',
-        'https://www.googleapis.com/auth/drive'
+        'https://www.googleapis.com/auth/spreadsheets.readonly',
+        'https://www.googleapis.com/auth/drive.readonly'
     ]
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -406,13 +406,13 @@ def get_notification_settings(client) -> Dict[str, dict]:
         return {}
 
 
-def get_login_credentials(client, notification_settings: Dict[str, dict], instant_only: bool = False) -> tuple:
+def get_login_credentials(client, notification_settings: Dict[str, dict], instant_only: bool = False) -> List[dict]:
     """ログイン情報シートから認証情報を取得（engage + is_active=TRUE）
 
-    Returns: (credentials_list, worksheet) - worksheetはIMAP書き戻し用
+    IMAP列が空の場合はメールアドレスのドメインから自動判定する。
     """
     if not client:
-        return [], None
+        return []
 
     try:
         spreadsheet = client.open_by_key(CONFIG_SPREADSHEET_ID)
@@ -442,10 +442,16 @@ def get_login_credentials(client, notification_settings: Dict[str, dict], instan
             if not instant_only and is_instant:
                 continue
 
+            # IMAP列が空の場合はメールアドレスから自動判定
+            if not imap_server:
+                imap_server = resolve_imap_server(email)
+                print(f'  [{client_name}] IMAP自動判定: {imap_server}')
+            else:
+                print(f'  [{client_name}] IMAP: {imap_server} (スプレッドシート設定)')
+
             notify_config = notification_settings.get(notify_setting_name, {})
 
             credentials.append({
-                'row': i + 2,
                 'email': email,
                 'password': password,
                 'imap_server': imap_server,
@@ -457,42 +463,11 @@ def get_login_credentials(client, notification_settings: Dict[str, dict], instan
 
         mode_label = "即時反応" if instant_only else "通常"
         print(f"取得したログイン情報: {len(credentials)}件 ({mode_label}モード)")
-        return credentials, worksheet
+        return credentials
 
     except Exception as e:
         print(f'ログイン情報取得エラー: {e}')
-        return [], None
-
-
-def resolve_and_writeback_imap(credentials: List[dict], worksheet) -> None:
-    """IMAP列が空のアカウントに対してIMAPサーバーを自動判定し、スプレッドシートに書き戻す"""
-    if not worksheet:
-        return
-
-    headers = worksheet.row_values(1)
-    try:
-        imap_col_idx = headers.index('IMAP') + 1
-    except ValueError:
-        print('[IMAP解決] スプレッドシートに「IMAP」列が見つかりません')
-        return
-
-    updated = 0
-    for cred in credentials:
-        if cred['imap_server']:
-            print(f'  [{cred["client_name"]}] IMAP: {cred["imap_server"]} (設定済み)')
-            continue
-
-        resolved = resolve_imap_server(cred['email'])
-        if resolved:
-            cred['imap_server'] = resolved
-            worksheet.update_cell(cred['row'], imap_col_idx, resolved)
-            print(f'  [{cred["client_name"]}] IMAP: {resolved} (自動判定→書き戻し)')
-            updated += 1
-
-    if updated:
-        print(f'[IMAP解決] {updated}件のIMAPサーバーを自動判定・書き戻しました')
-    else:
-        print(f'[IMAP解決] 全アカウントのIMAPサーバーが設定済みです')
+        return []
 
 
 def get_job_mappings(client) -> Dict[str, List[str]]:
@@ -862,8 +837,6 @@ def main():
     parser = argparse.ArgumentParser(description='Engage応募通知')
     parser.add_argument('--instant', action='store_true',
                         help='即時反応モード: 即時反応=TRUEのクライアントのみ処理し、LINE通知も送信')
-    parser.add_argument('--resolve-imap', action='store_true',
-                        help='IMAP列が空のアカウントのIMAPサーバーを自動判定して書き戻すのみ（メール処理は行わない）')
     args = parser.parse_args()
     instant_mode = args.instant
 
@@ -872,7 +845,7 @@ def main():
     mode_label = "即時反応モード" if instant_mode else "通常モード"
     print("="*50)
     print(f"Engage応募通知 開始 ({mode_label})")
-    print(f"コードバージョン: 2026-02-12c")
+    print(f"コードバージョン: 2026-02-12d")
     print(f"実行日時: {datetime.now(JST).strftime('%Y/%m/%d %H:%M:%S')} (JST)")
     print("="*50)
 
@@ -892,29 +865,13 @@ def main():
         print('[初期化] 通知設定取得中...')
         notification_settings = get_notification_settings(sheets_client)
 
-    # ログイン情報をスプレッドシートから取得
+    # ログイン情報をスプレッドシートから取得（IMAP列が空なら自動判定）
     print('[初期化] ログイン情報取得中...')
-    if args.resolve_imap:
-        # --resolve-imapモード: 通常+即時反応の全engageアカウントを対象
-        creds_normal, config_worksheet = get_login_credentials(sheets_client, notification_settings, instant_only=False)
-        creds_instant, _ = get_login_credentials(sheets_client, notification_settings, instant_only=True)
-        all_creds = creds_normal + creds_instant
-        if not all_creds:
-            print('エラー: 対象のログイン情報が見つかりません')
-            return
-        print(f'[IMAP解決モード] 全{len(all_creds)}アカウントのIMAPサーバーを自動判定')
-        resolve_and_writeback_imap(all_creds, config_worksheet)
-        return
-
-    credentials, config_worksheet = get_login_credentials(sheets_client, notification_settings, instant_only=instant_mode)
+    credentials = get_login_credentials(sheets_client, notification_settings, instant_only=instant_mode)
     if not credentials:
         filter_label = "engage + is_active=TRUE + 即時反応=TRUE" if instant_mode else "engage + is_active=TRUE"
         print(f'エラー: 対象のログイン情報が見つかりません（{filter_label}）')
         return
-
-    # IMAP列が空のアカウントに対してIMAPサーバーを自動判定・書き戻し
-    print('[初期化] IMAPサーバー解決中...')
-    resolve_and_writeback_imap(credentials, config_worksheet)
 
     print(f'[初期化] 処理対象アカウント数: {len(credentials)}')
     for i, cred in enumerate(credentials):
