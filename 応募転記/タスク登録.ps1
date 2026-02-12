@@ -2,7 +2,7 @@
 # 管理者権限のPowerShellで実行してください
 
 $taskName = "Engage応募チェック"
-$basePath = "C:\Users\Administrator\Documents\GitHub\Engage-automation\ムームードメイン応募転記"
+$basePath = "C:\Users\Administrator\Documents\GitHub\Engage-automation\応募転記"
 $batPath  = Join-Path $basePath "実行.bat"
 
 # 既存タスクがあれば削除

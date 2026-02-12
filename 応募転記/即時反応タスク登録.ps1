@@ -1,5 +1,5 @@
 $taskName = "Engage即時反応チェック"
-$basePath = "C:\Users\Administrator\Documents\GitHub\Engage-automation\ムームードメイン応募転記"
+$basePath = "C:\Users\Administrator\Documents\GitHub\Engage-automation\応募転記"
 $batPath = Join-Path $basePath "即時反応.bat"
 
 if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
