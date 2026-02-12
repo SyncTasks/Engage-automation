@@ -3,3 +3,4 @@ google-auth>=2.22.0
 imap-tools>=1.5.0
 requests>=2.31.0
 python-dotenv>=1.0.0
+dnspython>=2.4.0
