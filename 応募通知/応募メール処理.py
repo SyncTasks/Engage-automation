@@ -81,7 +81,7 @@ INSTANT_LINE_ACCESS_TOKEN = "Mw2VoARIaLmAZw39NlvSlwRYIWcSMZ4A449jrgMK/5aBmipl29R
 INSTANT_LINE_GROUP_ID = "C1735273ce570b8b4817c1734ff5acec6"
 
 # 検索対象期間（日数）
-SEARCH_DAYS_AGO = 7  # 7日以内のメールのみ処理
+SEARCH_DAYS_AGO = 1  # 1日以内のメールのみ処理
 
 # 都道府県リスト
 PREFECTURES = [
@@ -538,10 +538,10 @@ def send_notification(data: dict, notify_config: dict, instant_mode: bool = Fals
         print("通知設定がありません、通知をスキップ")
         return
 
-    # Chatwork通知（全アカウント共通のルームに送信）
-    if CHATWORK_TOKEN and CHATWORK_ROOM_ID:
-        message = format_chatwork_message(data, instant_mode=instant_mode)
-        send_to_chatwork(CHATWORK_TOKEN, CHATWORK_ROOM_ID, message)
+    # Chatwork通知（一時的に無効化）
+    # if CHATWORK_TOKEN and CHATWORK_ROOM_ID:
+    #     message = format_chatwork_message(data, instant_mode=instant_mode)
+    #     send_to_chatwork(CHATWORK_TOKEN, CHATWORK_ROOM_ID, message)
 
     # 即時反応モードの場合、LINEグループにも通知
     if instant_mode:
