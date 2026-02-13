@@ -588,7 +588,7 @@ def format_line_message(data: dict) -> str:
     client = data.get('client', '')
 
     lines = []
-    lines.append(f'🎉 {client}：Engage新規応募【即時通知】')
+    lines.append(f'🟪 {client}：Engage新規応募【即時通知】')
     lines.append(f'━━━━━━━━━━━━━━')
     lines.append(f'応募職種: {data.get("title", "")}')
     if data.get('job_type'):
@@ -599,9 +599,6 @@ def format_line_message(data: dict) -> str:
     if location:
         lines.append(f'勤務地: {location}')
     lines.append(f'応募日時: {date_str}')
-    if data.get('apply_url'):
-        lines.append(f'確認URL: {data.get("apply_url", "")}')
-
     return '\n'.join(lines)
 
 
