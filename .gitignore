@@ -4,3 +4,7 @@ venv/
 logs/
 logs_instant/
 .claude/
+chrome_profile/
+*.log
+run_log.txt
+Credentials.json

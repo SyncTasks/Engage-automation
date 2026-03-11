@@ -56,11 +56,11 @@ load_dotenv(os.path.join(_script_dir, '.env'))
 import requests
 from google.oauth2.service_account import Credentials
 import dns.resolver
-from imap_tools import MailBox, AND
+from imap_tools import MailBox, AND, OR
 
 
 # ===== 設定 =====
-ENGAGE_SENDER_ADDRESS = 'system@en-gage.net'  # Engageからの通知メール送信元
+ENGAGE_SENDER_ADDRESSES = ['system@en-gage.net', 'noreply@en-gage.net']  # Engageからの通知メール送信元
 
 # ドメイン → IMAPサーバーの既知マッピング
 KNOWN_IMAP_HOSTS = {
@@ -678,8 +678,9 @@ def process_mailbox(credential: dict, sheets_client, job_mappings: dict, facilit
 
         with mailbox_ctx as mb:
             # Engageからのフラグなしメールを検索（処理済みはフラグ付きなのでスキップされる）
-            query = AND(flagged=False, from_=ENGAGE_SENDER_ADDRESS)
-            print(f'  [{client_name}] メール検索中 (flagged=False, from={ENGAGE_SENDER_ADDRESS})...')
+            from_query = OR(AND(from_=ENGAGE_SENDER_ADDRESSES[0]), AND(from_=ENGAGE_SENDER_ADDRESSES[1]))
+            query = AND(AND(flagged=False), from_query)
+            print(f'  [{client_name}] メール検索中 (flagged=False, from={ENGAGE_SENDER_ADDRESSES})...')
 
             messages = list(mb.fetch(query))
             print(f'  [{client_name}] 取得メール数: {len(messages)}件')
