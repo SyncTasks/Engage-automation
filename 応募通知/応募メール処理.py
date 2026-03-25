@@ -642,6 +642,169 @@ def format_chatwork_message(data: dict, instant_mode: bool = False) -> str:
     return '\n'.join(lines)
 
 
+# ===== 即時通知用スクレイピング連携 =====
+
+# ロックファイルパス（即時モードの多重実行防止）
+_script_dir_for_lock = os.path.dirname(os.path.abspath(__file__))
+INSTANT_SCRAPER_LOCK = os.path.join(_script_dir_for_lock, 'instant_scraper.lock')
+
+
+def _run_engage_scraper_once(client_name: str, email: str, password: str, max_count: int = 1) -> dict:
+    """応募転記のvenvでinstant_scraper.pyをサブプロセス実行（1回分）"""
+    import subprocess
+
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    python_exe = os.path.join(base_dir, '応募転記', 'venv', 'Scripts', 'python.exe')
+    script_path = os.path.join(base_dir, '応募転記', 'instant_scraper.py')
+
+    cmd = [
+        python_exe, '-u', script_path,
+        '--client-name', client_name,
+        '--email', email,
+        '--password', password,
+        '--max-count', str(max_count),
+    ]
+
+    try:
+        env = os.environ.copy()
+        env['PYTHONIOENCODING'] = 'utf-8'
+
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=300,
+            encoding='utf-8',
+            errors='replace',
+            env=env,
+        )
+
+        # stdoutから ###RESULT### マーカーを探す
+        stdout = proc.stdout or ''
+        stderr = proc.stderr or ''
+
+        if proc.returncode != 0:
+            print(f'  [スクレイパー] プロセス終了コード: {proc.returncode}')
+            if stderr:
+                print(f'  [スクレイパー] stderr: {stderr[:500]}')
+
+        # ###RESULT###...###RESULT### を探してJSONパース
+        import re as _re
+        match = _re.search(r'###RESULT###(.+?)###RESULT###', stdout)
+        if match:
+            result = json.loads(match.group(1))
+            return result
+
+        print(f'  [スクレイパー] 結果マーカーが見つかりません')
+        if stdout:
+            print(f'  [スクレイパー] stdout末尾: {stdout[-300:]}')
+        return {"success": False, "written_count": 0, "applicants": [], "error": "結果マーカーが見つかりません"}
+
+    except subprocess.TimeoutExpired:
+        print(f'  [スクレイパー] タイムアウト (300秒)')
+        return {"success": False, "written_count": 0, "applicants": [], "error": "タイムアウト (300秒)"}
+    except Exception as e:
+        print(f'  [スクレイパー] 実行エラー: {type(e).__name__}: {e}')
+        return {"success": False, "written_count": 0, "applicants": [], "error": f"{type(e).__name__}: {str(e)}"}
+
+
+def run_engage_scraper(client_name: str, email: str, password: str) -> dict:
+    """応募転記を1人ずつサブプロセス実行し、結果をまとめて返す"""
+    combined_result = {
+        "success": False,
+        "written_count": 0,
+        "applicants": [],
+        "error": None,
+    }
+
+    MAX_ITERATIONS = 10  # 安全上限
+
+    for i in range(MAX_ITERATIONS):
+        print(f'  [スクレイパー] サブプロセス実行 ({i+1}回目): {client_name}')
+        result = _run_engage_scraper_once(client_name, email, password, max_count=1)
+
+        if not result.get("success"):
+            # 失敗した場合、これまでの成果があれば部分成功として返す
+            if combined_result["written_count"] > 0:
+                combined_result["success"] = True
+                print(f'  [スクレイパー] {i+1}回目で失敗、部分成功 (転記済み: {combined_result["written_count"]}件)')
+            else:
+                combined_result["error"] = result.get("error")
+                print(f'  [スクレイパー] 失敗: {combined_result["error"]}')
+            break
+
+        # 成功した分をマージ
+        written = result.get("written_count", 0)
+        applicants = result.get("applicants", [])
+        combined_result["written_count"] += written
+        combined_result["applicants"].extend(applicants)
+
+        print(f'  [スクレイパー] {i+1}回目結果: 転記={written}件, 累計={combined_result["written_count"]}件')
+
+        if written == 0:
+            # 転記対象がなかった = もう新規応募なし
+            combined_result["success"] = True
+            print(f'  [スクレイパー] 新規応募なし、終了')
+            break
+    else:
+        # MAX_ITERATIONS到達
+        combined_result["success"] = True
+        print(f'  [スクレイパー] 最大反復回数({MAX_ITERATIONS})に到達、終了')
+
+    return combined_result
+
+
+def format_line_message_detail(applicant: dict) -> str:
+    """スクレイピング成功時の詳細LINE通知メッセージ（applicantデータのみで構成）"""
+    client = applicant.get('クライアント', '')
+
+    lines = []
+    lines.append(f'🟪 {client}：Engage新規応募【即時通知】')
+    lines.append(f'━━━━━━━━━━━━━━')
+
+    if applicant.get('名前'):
+        lines.append(f'応募者名: {applicant["名前"]}')
+    if applicant.get('年齢'):
+        lines.append(f'年齢: {applicant["年齢"]}')
+    if applicant.get('性別'):
+        lines.append(f'性別: {applicant["性別"]}')
+    if applicant.get('電話番号'):
+        lines.append(f'電話番号: {applicant["電話番号"]}')
+    if applicant.get('タイトル'):
+        lines.append(f'応募職種: {applicant["タイトル"]}')
+    if applicant.get('職種'):
+        lines.append(f'職種: {applicant["職種"]}')
+    if applicant.get('住所'):
+        lines.append(f'住所: {applicant["住所"]}')
+    if applicant.get('応募日時'):
+        lines.append(f'応募日時: {applicant["応募日時"]}')
+    lines.append(f'')
+    lines.append(f'✅ スプレッドシート転記済み')
+    return '\n'.join(lines)
+
+
+def format_line_message_error(data: dict, error_reason: str) -> str:
+    """スクレイピング失敗時のLINE通知メッセージ（基本情報 + エラー理由）"""
+    date_str = data['date'].strftime('%Y/%m/%d %H:%M') if data.get('date') else ''
+    client = data.get('client', '')
+
+    lines = []
+    lines.append(f'🟪 {client}：Engage新規応募【即時通知】')
+    lines.append(f'━━━━━━━━━━━━━━')
+    lines.append(f'応募職種: {data.get("title", "")}')
+    if data.get('job_type'):
+        lines.append(f'職種: {data.get("job_type", "")}')
+    if data.get('company_name'):
+        lines.append(f'応募先企業名: {data.get("company_name", "")}')
+    location = data.get('location') or data.get('prefecture', '')
+    if location:
+        lines.append(f'勤務地: {location}')
+    lines.append(f'応募日時: {date_str}')
+    lines.append(f'')
+    lines.append(f'⚠️ スプレッドシート転記失敗: {error_reason}')
+    return '\n'.join(lines)
+
+
 # ===== メール処理 =====
 
 def process_mailbox(credential: dict, sheets_client, job_mappings: dict, facility_mappings: dict, instant_mode: bool = False) -> int:
@@ -688,6 +851,7 @@ def process_mailbox(credential: dict, sheets_client, job_mappings: dict, facilit
             skipped_non_apply = 0
             skipped_old = 0
             skipped_no_title = 0
+            instant_record_list = []  # 即時モード用: record_dataを収集
 
             for i, msg in enumerate(messages):
                 from_addr = msg.from_ or ''
@@ -799,14 +963,22 @@ def process_mailbox(credential: dict, sheets_client, job_mappings: dict, facilit
                     'apply_url': apply_url
                 }
 
-                # 通知を送信
-                print(f'    通知送信中...')
-                send_notification(record_data, notify_config, instant_mode=instant_mode)
+                if instant_mode:
+                    # 即時モード: record_dataをリストに収集、通知はまだ送らない
+                    instant_record_list.append(record_data)
+                    # フラグ（スター）を付けて処理済みにする
+                    mb.flag(msg.uid, ['\\Flagged'], True)
+                    print(f'    → フラグ付与（通知は転記後に送信）')
+                    count += 1
+                else:
+                    # 通常モード: 即座に通知を送信
+                    print(f'    通知送信中...')
+                    send_notification(record_data, notify_config, instant_mode=instant_mode)
 
-                # フラグ（スター）を付けて処理済みにする
-                mb.flag(msg.uid, ['\\Flagged'], True)
-                print(f'    → 完了: 通知送信・フラグ付与')
-                count += 1
+                    # フラグ（スター）を付けて処理済みにする
+                    mb.flag(msg.uid, ['\\Flagged'], True)
+                    print(f'    → 完了: 通知送信・フラグ付与')
+                    count += 1
 
             # サマリー
             print(f'\n  [{client_name}] --- メール処理サマリー ---')
@@ -815,6 +987,44 @@ def process_mailbox(credential: dict, sheets_client, job_mappings: dict, facilit
             print(f'    古いメールスキップ: {skipped_old}件')
             print(f'    職種名抽出失敗スキップ: {skipped_no_title}件')
             print(f'    新規通知: {count}件')
+
+        # 即時モード: 新規メールがあった場合、スクレイピング→転記→通知
+        if instant_mode and instant_record_list:
+            print(f'\n  [{client_name}] 即時転記処理開始 ({len(instant_record_list)}件の新規応募)')
+
+            # ロックファイル作成
+            try:
+                with open(INSTANT_SCRAPER_LOCK, 'w') as f:
+                    f.write(f'{datetime.now(JST).isoformat()} {client_name}')
+                print(f'  [{client_name}] ロックファイル作成')
+            except Exception as e:
+                print(f'  [{client_name}] ロックファイル作成失敗: {e}')
+
+            try:
+                scraper_result = run_engage_scraper(client_name, email_user, email_pass)
+            finally:
+                # ロックファイル削除
+                try:
+                    if os.path.exists(INSTANT_SCRAPER_LOCK):
+                        os.remove(INSTANT_SCRAPER_LOCK)
+                        print(f'  [{client_name}] ロックファイル削除')
+                except Exception as e:
+                    print(f'  [{client_name}] ロックファイル削除失敗: {e}')
+
+            if scraper_result.get("success") and scraper_result.get("applicants"):
+                # スクレイピング成功: 転記された応募者ごとに詳細通知を送信
+                applicants = scraper_result["applicants"]
+                for applicant in applicants:
+                    line_message = format_line_message_detail(applicant)
+                    send_to_line(INSTANT_LINE_ACCESS_TOKEN, INSTANT_LINE_GROUP_ID, line_message)
+                print(f'  [{client_name}] 詳細通知送信完了 (転記: {scraper_result.get("written_count", 0)}件)')
+            else:
+                # スクレイピング失敗: メール検知分だけエラー付き基本通知を送信
+                error_reason = scraper_result.get("error", "不明なエラー")
+                for record_data in instant_record_list:
+                    line_message = format_line_message_error(record_data, error_reason)
+                    send_to_line(INSTANT_LINE_ACCESS_TOKEN, INSTANT_LINE_GROUP_ID, line_message)
+                print(f'  [{client_name}] エラー通知送信完了 (理由: {error_reason})')
 
     except Exception as e:
         print(f'[{client_name}] メール処理エラー: {type(e).__name__}: {e}')
@@ -837,6 +1047,13 @@ def main():
                         help='即時反応モード: 即時反応=TRUEのクライアントのみ処理し、LINE通知も送信')
     args = parser.parse_args()
     instant_mode = args.instant
+
+    # 即時モード: ロックファイルチェック（多重実行防止）
+    if instant_mode:
+        if os.path.exists(INSTANT_SCRAPER_LOCK):
+            print(f"ロックファイルが存在します: {INSTANT_SCRAPER_LOCK}")
+            print("別の即時転記処理が実行中のため、スキップします")
+            return
 
     main_start = time.time()
 
