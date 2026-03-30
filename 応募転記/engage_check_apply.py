@@ -631,7 +631,16 @@ async def extract_additional_info(modal: ElementHandle, page: Page) -> Dict[str,
     details['生年月日'] = (await get_element_text(modal, 'dt.item:has-text("年齢") + dd.data')).split('（')[0].strip()
     details['タイトル'] = await get_element_text(modal, 'dl.md_horizonTable.long dd.data.long a')
     details['現職'] = await get_element_text(modal, 'dt.item:has-text("就業経験") + dd.data')
-    details['住所'] = (await get_element_text(modal, 'dt.item:has-text("現住所") + dd.data')).replace('\n', '').strip()
+    raw_address = (await get_element_text(modal, 'dt.item:has-text("現住所") + dd.data')).replace('\n', '').strip()
+    # Engageのモーダルで都道府県ラベルと住所本体が両方取れて重複するケースを除去
+    # 例: "東京都東京都 東大和市..." → "東京都 東大和市..."
+    pref_match = re.match(r'^(.+?[都道府県])(.+)$', raw_address)
+    if pref_match:
+        pref = pref_match.group(1)
+        rest = pref_match.group(2)
+        if rest.startswith(pref):
+            raw_address = rest
+    details['住所'] = raw_address
     details['学歴'] = (await get_element_text(modal, 'dt.item:has-text("最終学歴") + dd.data')).split('（')[0].strip().split('/')[0].strip()
     details['応募日時'] = await get_element_text(modal, 'dt.item:has-text("応募日") + dd.data')
 
