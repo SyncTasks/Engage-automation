@@ -53,14 +53,21 @@ class SpreadsheetManager:
         # USER_ENTEREDで書き込み（数値・日付を適切に解釈させる）
         self.sheet.append_row(row_data, value_input_option='USER_ENTERED')
 
-        # 郵便番号をヘッダー名で列を探して書き込み
+        # ヘッダー名で列を探して追加書き込み
+        header_row = self.sheet.row_values(1)
+        last_row = len(self.sheet.get_all_values())
+
+        # 郵便番号
         postal_code = data.get("郵便番号", "")
-        if postal_code:
-            header_row = self.sheet.row_values(1)
-            if "郵便番号" in header_row:
-                col_index = header_row.index("郵便番号") + 1  # 1-based
-                last_row = len(self.sheet.get_all_values())
-                self.sheet.update_cell(last_row, col_index, postal_code)
+        if postal_code and "郵便番号" in header_row:
+            col_index = header_row.index("郵便番号") + 1  # 1-based
+            self.sheet.update_cell(last_row, col_index, postal_code)
+
+        # 実行環境
+        execution_env = data.get("実行環境", "")
+        if execution_env and "実行環境" in header_row:
+            col_index = header_row.index("実行環境") + 1  # 1-based
+            self.sheet.update_cell(last_row, col_index, execution_env)
 
     @classmethod
     def get_existing_ids(cls):
@@ -256,7 +263,8 @@ class DataProcessor:
             "集計状況": "",  # 空欄
             "媒体": "Engage",  # 固定値
             "応募先企業名": "",  # 空欄
-            "": ""  # 末尾の空欄カラム
+            "": "",  # 末尾の空欄カラム
+            "実行環境": self.scraper_data.get("実行環境", "VPS4号_ Engage-automation"),
         }
         return processed_data
 
